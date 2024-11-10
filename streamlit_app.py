@@ -1442,9 +1442,15 @@ def main():
         help="Include forked repositories in the analysis"
     )
 
-    # Reset button
-    if st.sidebar.button("Reset Analysis", key="reset_analysis"):
-        st.session_state.clear()
+    # Start Analysis button
+    start_analysis = st.sidebar.button("Start Analysis", key="start_analysis")
+
+    if start_analysis:
+        # Clear all cache and session state when starting new analysis
+        st.cache_data.clear()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.session_state.analysis_requested = True
         st.rerun()
 
     # Show analysis status if complete
@@ -1454,15 +1460,11 @@ def main():
             unsafe_allow_html=True
         )
 
-    if github_token and uploaded_file:
+    # Only proceed with analysis if explicitly requested and inputs are provided
+    if github_token and uploaded_file and st.session_state.get('analysis_requested', False):
         try:
-            # Initialize or get analysis state
-            if 'analysis_complete' not in st.session_state:
-                st.session_state.analysis_complete = False
-                st.session_state.companies_data = None
-
-            # Perform analysis if needed
-            if not st.session_state.analysis_complete:
+            # Initialize analysis state if needed
+            if not st.session_state.get('analysis_complete', False):
                 # Initialize GitHub API client
                 github_api = GitHubAPI(github_token)
                 
@@ -1471,6 +1473,7 @@ def main():
                 
                 if not companies:
                     st.error("No valid company names found in the uploaded file.")
+                    st.session_state.analysis_requested = False
                     return
 
                 # Display initial message
@@ -1481,40 +1484,47 @@ def main():
                     companies_data = perform_github_analysis(github_api, companies)
                     
                     if companies_data:
-                        # Store results and rerun
+                        # Store results and mark complete
                         st.session_state.companies_data = companies_data
                         st.session_state.analysis_complete = True
                         st.rerun()
                     else:
                         st.error("No valid data could be retrieved for the specified companies.")
-                        if 'analysis_complete' in st.session_state:
-                            del st.session_state.analysis_complete
+                        st.session_state.analysis_requested = False
                         return
                         
                 except Exception as analysis_error:
                     st.error(f"Analysis failed: {str(analysis_error)}")
                     logger.error(f"Analysis error: {str(analysis_error)}")
-                    if 'analysis_complete' in st.session_state:
-                        del st.session_state.analysis_complete
+                    st.session_state.analysis_requested = False
                     return
 
             # Create visualizations using cached data
-            if st.session_state.companies_data:
+            if st.session_state.get('companies_data'):
                 create_enhanced_visualizations(st.session_state.companies_data)
             
         except requests.exceptions.RequestException as e:
             st.error(f"Network Error: Could not connect to GitHub API. {str(e)}")
             logger.error(f"Network error: {str(e)}")
-            if 'analysis_complete' in st.session_state:
-                del st.session_state.analysis_complete
+            st.session_state.analysis_requested = False
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
             logger.error(f"Error in main execution: {str(e)}", exc_info=True)
-            if 'analysis_complete' in st.session_state:
-                del st.session_state.analysis_complete
+            st.session_state.analysis_requested = False
     
     else:
-        st.info("Please provide your GitHub token and upload a company list to begin analysis.")
+        # Show instructions if analysis not started or inputs missing
+        message = []
+        if not github_token:
+            message.append("- GitHub Token")
+        if not uploaded_file:
+            message.append("- Company List File")
+        if not st.session_state.get('analysis_requested', False):
+            if github_token and uploaded_file:
+                message.append("- Click 'Start Analysis' to begin")
+            
+        if message:
+            st.info("Please provide the following to begin analysis:\n" + "\n".join(message))
         
         with st.expander("ℹ️ How to Get Started"):
             st.markdown("""
@@ -1547,6 +1557,10 @@ def main():
                    - Adjust the analysis period to focus on specific timeframes
                    - Choose whether to include forked repositories
                    - Select specific metrics to analyze
+                
+                5. **Start Analysis**
+                   - After providing the token and company list
+                   - Click the 'Start Analysis' button to begin
             """)
 
     # Add footer
@@ -1562,8 +1576,6 @@ def main():
         """, 
         unsafe_allow_html=True
     )
-
-
 
 @cache_data
 def perform_github_analysis(_github_api, companies):
