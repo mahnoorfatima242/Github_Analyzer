@@ -2,7 +2,6 @@
 
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta
@@ -10,17 +9,13 @@ from collections import defaultdict
 import time
 from typing import List, Dict, Any
 import json
+from streamlit import cache_data
 import logging
-from tqdm import tqdm
 import sys
 import numpy as np
 from plotly.subplots import make_subplots
 import re
-from wordcloud import WordCloud
-import matplotlib.pyplot as plt
 import calendar
-import seaborn as sns
-from scipy import stats
 
 # Configure logging
 logging.basicConfig(
@@ -52,12 +47,16 @@ class GitHubAPI:
         logger.info(f"Rate Limits: {self.rate_limit_remaining}/{self.rate_limit} (Reset: {reset_time})")
 
     def _make_request(self, url: str, params: dict = None) -> dict:
+        """Make an API request with improved error handling."""
         try:
             logger.info(f"Request: GET {url} {params if params else ''}")
             
             response = self.session.get(url, params=params)
             self._update_rate_limit(response)
 
+            if response.status_code == 204:  # No content
+                return {}  # Return empty dict instead of None
+                
             if response.status_code == 403 and 'rate limit exceeded' in response.text.lower():
                 wait_time = max(self.rate_limit_reset - time.time(), 0)
                 if wait_time > 0:
@@ -66,12 +65,11 @@ class GitHubAPI:
                     return self._make_request(url, params)
 
             response.raise_for_status()
-            logger.info(f"Response: {response.status_code} ({len(response.text)} bytes)")
             return response.json()
 
         except requests.exceptions.RequestException as e:
             logger.error(f"API Error: {str(e)}")
-            return None
+            return {}  # Return empty dict on error
 
     def get_organization(self, org_name: str) -> dict:
         url = f"{self.base_url}/orgs/{org_name}"
@@ -88,8 +86,52 @@ class GitHubAPI:
         return self._make_request(url, params)
 
     def get_repository_details(self, org_name: str, repo_name: str) -> dict:
-        url = f"{self.base_url}/repos/{org_name}/{repo_name}"
-        return self._make_request(url)
+        """Get repository details with additional metadata for framework detection."""
+        try:
+            # Get basic repo info
+            url = f"{self.base_url}/repos/{org_name}/{repo_name}"
+            repo_data = self._make_request(url)
+            
+            if not repo_data:
+                return {}
+                
+            # Get repository contents to check for framework-related files
+            contents_url = f"{self.base_url}/repos/{org_name}/{repo_name}/contents"
+            contents = self._make_request(contents_url)
+            
+            # Look for key files that indicate framework usage
+            framework_indicators = {
+                'tensorflow': ['tensorflow', 'requirements.txt', 'environment.yml'],
+                'pytorch': ['torch', 'requirements.txt', 'environment.yml'],
+                'keras': ['keras', 'requirements.txt', 'environment.yml'],
+                'scikit-learn': ['sklearn', 'requirements.txt', 'environment.yml'],
+            }
+            
+            detected_frameworks = set()
+            if isinstance(contents, list):
+                for item in contents:
+                    filename = item.get('name', '').lower()
+                    for framework, indicators in framework_indicators.items():
+                        if any(indicator in filename for indicator in indicators):
+                            detected_frameworks.add(framework)
+            
+            # Add detected frameworks to repo data
+            repo_data['detected_frameworks'] = list(detected_frameworks)
+            
+            # Add enhanced topic analysis
+            repo_data['ai_topics'] = [
+                topic for topic in repo_data.get('topics', [])
+                if any(keyword in topic for keyword in [
+                    'ai', 'ml', 'deep-learning', 'machine-learning', 
+                    'neural', 'tensorflow', 'pytorch', 'keras'
+                ])
+            ]
+                    
+            return repo_data
+            
+        except Exception as e:
+            logger.error(f"Error getting repository details for {org_name}/{repo_name}: {str(e)}")
+            return {}
 
     def get_repository_languages(self, org_name: str, repo_name: str) -> dict:
         url = f"{self.base_url}/repos/{org_name}/{repo_name}/languages"
@@ -131,21 +173,27 @@ def is_ai_repository(repo: dict) -> bool:
     )
 
 def validate_token(self):
-        """Validate GitHub token by making a test API call."""
-        try:
-            response = self.session.get(f"{self.base_url}/user")
-            if response.status_code == 401:
-                raise ValueError(
-                    "Invalid GitHub token. Please ensure you have provided a valid token "
-                    "with the required permissions (repo, read:org, read:user)."
-                )
-            elif response.status_code != 200:
-                raise ValueError(
-                    f"GitHub API error during token validation: {response.status_code} - {response.text}"
-                )
-            return True
-        except requests.exceptions.RequestException as e:
-            raise ValueError(f"Connection error during token validation: {str(e)}")
+    """Validate GitHub token by making a test API call."""
+    try:
+        url = f"{self.base_url}/user"
+        response = self.session.get(url)
+        
+        if response.status_code == 401:
+            raise ValueError(
+                "Invalid GitHub token. Please ensure you have provided a valid token "
+                "with the required permissions (repo, read:org, read:user)."
+            )
+        elif response.status_code != 200:
+            raise ValueError(
+                f"GitHub API error during token validation: {response.status_code} - {response.text}"
+            )
+        
+        # Update rate limit info from the response
+        self._update_rate_limit(response)
+        return True
+        
+    except requests.exceptions.RequestException as e:
+        raise ValueError(f"Connection error during token validation: {str(e)}")
 
 def _update_rate_limit(self, response):
         """Update rate limit information from response headers."""
@@ -248,33 +296,70 @@ def _make_request(self, url: str, params: dict = None) -> dict:
         return {'error': 'Max retries exceeded'}
 
 def analyze_repository_topics(repo: dict) -> Dict[str, Any]:
+    """Analyze repository topics with improved categorization."""
     topics = repo.get('topics', [])
     
     categories = {
-        'ai_ml': {'ai', 'machine-learning', 'deep-learning', 'neural-networks', 'tensorflow', 'pytorch', 'keras'},
-        'data_science': {'data-science', 'data-analytics', 'big-data', 'data-visualization'},
-        'web_dev': {'web', 'javascript', 'frontend', 'backend', 'fullstack'},
-        'mobile': {'android', 'ios', 'mobile', 'react-native', 'flutter'},
-        'devops': {'devops', 'kubernetes', 'docker', 'cloud', 'aws', 'azure'},
-        'security': {'security', 'cryptography', 'encryption', 'authentication'}
+        'ai_ml': {
+            'ai', 'machine-learning', 'deep-learning', 'neural', 
+            'tensorflow', 'pytorch', 'keras', 'ml', 'artificial-intelligence',
+            'data-science', 'nlp', 'computer-vision', 'reinforcement-learning',
+            'neural-network', 'machine-learning-algorithms', 'deep-neural-networks',
+            'ai-tools', 'ml-ops', 'ml-pipeline'
+        },
+        'data_science': {
+            'data-science', 'data-analytics', 'big-data', 'data-visualization',
+            'data-mining', 'data-analysis', 'data-processing', 'etl',
+            'business-intelligence', 'statistics', 'predictive-analytics'
+        },
+        'natural_language': {
+            'nlp', 'natural-language-processing', 'text-mining', 
+            'language-model', 'text-analysis', 'speech-recognition',
+            'text-generation', 'chatbot', 'translation'
+        },
+        'computer_vision': {
+            'computer-vision', 'image-processing', 'object-detection',
+            'facial-recognition', 'image-classification', 'opencv',
+            'image-segmentation', 'video-processing'
+        },
+        'robotics_rl': {
+            'robotics', 'reinforcement-learning', 'autonomous-systems',
+            'robot-control', 'rl', 'deep-reinforcement-learning'
+        }
     }
     
     topic_analysis = {
         'raw_topics': topics,
-        'categories': defaultdict(int)
+        'categories': defaultdict(int),
+        'primary_category': None,
+        'ai_subcategories': []
     }
     
+    # Count matches in each category
     for topic in topics:
         for category, keywords in categories.items():
             if topic in keywords:
                 topic_analysis['categories'][category] += 1
+    
+    # Determine primary category
+    if topic_analysis['categories']:
+        topic_analysis['primary_category'] = max(
+            topic_analysis['categories'].items(),
+            key=lambda x: x[1]
+        )[0]
+        
+        # Get all AI-related subcategories
+        topic_analysis['ai_subcategories'] = [
+            category for category, count in topic_analysis['categories'].items()
+            if count > 0 and category != 'data_science'  # Exclude general data science
+        ]
     
     return topic_analysis
 
 
 
 def analyze_ai_tools(repo: dict) -> Dict[str, int]:
-    """Analyze AI tools and frameworks mentioned in repository."""
+    """Analyze AI tools and frameworks mentioned in repository with improved detection."""
     ai_tools = {
         'tensorflow': 0,
         'pytorch': 0,
@@ -294,11 +379,44 @@ def analyze_ai_tools(repo: dict) -> Dict[str, int]:
         'lightgbm': 0
     }
     
-    # Check description and topics
-    text_to_check = f"{repo.get('description', '')} {' '.join(repo.get('topics', []))}"
-    for tool in ai_tools:
-        if tool in text_to_check.lower():
-            ai_tools[tool] += 1
+    # Sources to check
+    sources = [
+        repo.get('description', '').lower(),
+        ' '.join(repo.get('topics', [])).lower(),
+        repo.get('name', '').lower(),
+        # Add readme content if available
+        repo.get('readme_content', '').lower()
+    ]
+    
+    # Framework variations to catch more mentions
+    framework_variants = {
+        'tensorflow': ['tensorflow', 'tf-', 'tf2', 'tf1'],
+        'pytorch': ['pytorch', 'torch'],
+        'scikit-learn': ['scikit-learn', 'sklearn'],
+        'hugging-face': ['hugging-face', 'huggingface', 'transformers'],
+        'opencv': ['opencv', 'cv2'],
+    }
+    
+    # Check all sources for mentions
+    for source in sources:
+        for tool in ai_tools.keys():
+            # Check main tool name
+            if tool in source:
+                ai_tools[tool] += 1
+            
+            # Check variations if they exist
+            if tool in framework_variants:
+                for variant in framework_variants[tool]:
+                    if variant in source:
+                        ai_tools[tool] += 1
+                        break
+    
+    # Check requirements files for more accurate detection
+    requirements = repo.get('requirements_content', '').lower()
+    if requirements:
+        for tool in ai_tools.keys():
+            if tool in requirements:
+                ai_tools[tool] += 2  # Weight requirements file mentions higher
     
     return ai_tools
 
@@ -538,7 +656,12 @@ def get_organization_data(github_api: GitHubAPI, org_name: str) -> Dict[str, Any
 
 def create_enhanced_visualizations(companies_data: List[Dict[str, Any]]):
     """Create all visualizations for the dashboard."""
-    
+    # Cache report generation
+    @cache_data
+    def get_cached_reports(data):
+        detailed_report = generate_detailed_report(data)
+        ai_report = generate_ai_report(data)
+        return detailed_report, ai_report    
     # 1. Overview Dashboard
     st.header("Organization Overview")
     
@@ -1001,30 +1124,31 @@ def create_enhanced_visualizations(companies_data: List[Dict[str, Any]]):
                     
                     
     # Download Reports
-    st.header("Download Reports")
+    detailed_report_data, ai_report_data = get_cached_reports(companies_data)
     
-    col1, col2 = st.columns(2)
+    # Add download section
+    st.markdown("---")
     
-    with col1:
-        if st.button("Generate Detailed Report"):
-            report_data = generate_detailed_report(companies_data)
+    # Export options with direct download buttons
+    with st.expander("📥 Export Options"):
+        col1, col2 = st.columns(2)
+        with col1:
             st.download_button(
-                label="Download Detailed Report",
-                data=report_data,
+                label="📊 Download Full Report",
+                data=detailed_report_data,
                 file_name="github_analytics_report.csv",
-                mime="text/csv"
+                mime="text/csv",
+                key="download_full_report"
             )
-    
-    with col2:
-        if st.button("Generate AI Focus Report"):
-            ai_report_data = generate_ai_report(companies_data)
+        
+        with col2:
             st.download_button(
-                label="Download AI Focus Report",
+                label="🤖 Download AI Report",
                 data=ai_report_data,
                 file_name="github_ai_report.csv",
-                mime="text/csv"
+                mime="text/csv",
+                key="download_ai_report"
             )
-
 
 def generate_detailed_report(companies_data: List[Dict[str, Any]]) -> str:
     """Generate detailed CSV report of all metrics."""
@@ -1239,7 +1363,7 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Custom CSS for better styling
+    # Custom CSS
     st.markdown("""
         <style>
         .main {
@@ -1256,15 +1380,30 @@ def main():
         .stProgress > div > div > div > div {
             background-color: #00ff00;
         }
+        .success-message {
+            color: #0f5132;
+            background-color: #d1e7dd;
+            border-color: #badbcc;
+            padding: 1rem;
+            border-radius: 0.25rem;
+            margin-bottom: 1rem;
+        }
+        .error-message {
+            color: #842029;
+            background-color: #f8d7da;
+            border-color: #f5c2c7;
+            padding: 1rem;
+            border-radius: 0.25rem;
+            margin-bottom: 1rem;
+        }
         </style>
     """, unsafe_allow_html=True)
     
-    # Application title and description
+    # Application header
     st.title("📊 GitHub Organization Analytics")
     st.markdown("""
         Analyze and compare GitHub organizations' development activities, 
-        AI initiatives, and developer contributions. Get detailed insights 
-        into repository distributions, technology stacks, and development patterns.
+        AI initiatives, and developer contributions.
     """)
     
     # Sidebar configuration
@@ -1286,6 +1425,8 @@ def main():
 
     # Analysis options
     st.sidebar.header("Analysis Settings")
+    
+    # Analysis period selector
     analysis_period = st.sidebar.slider(
         "Analysis Period (months)",
         min_value=1,
@@ -1294,75 +1435,83 @@ def main():
         help="Number of months of historical data to analyze"
     )
     
+    # Fork inclusion option
     include_forks = st.sidebar.checkbox(
         "Include Forks",
         value=False,
         help="Include forked repositories in the analysis"
     )
 
+    # Reset button
+    if st.sidebar.button("Reset Analysis", key="reset_analysis"):
+        st.session_state.clear()
+        st.rerun()
+
+    # Show analysis status if complete
+    if 'analysis_complete' in st.session_state and st.session_state.analysis_complete:
+        st.sidebar.markdown(
+            '<div class="success-message">✅ Analysis Complete</div>', 
+            unsafe_allow_html=True
+        )
+
     if github_token and uploaded_file:
         try:
-            # Initialize GitHub API client
-            github_api = GitHubAPI(github_token)
-            
-            # Parse company names
-            companies = parse_company_urls(uploaded_file.read())
-            
-            if not companies:
-                st.error("No valid company names found in the uploaded file.")
-                return
+            # Initialize or get analysis state
+            if 'analysis_complete' not in st.session_state:
+                st.session_state.analysis_complete = False
+                st.session_state.companies_data = None
 
-            # Process data with progress tracking
-            progress_text = st.empty()
-            progress_bar = st.progress(0)
-            
-            companies_data = []
-            for idx, company in enumerate(companies):
-                progress_text.text(f"Analyzing {company}... ({idx + 1}/{len(companies)})")
-                progress_bar.progress((idx + 1) / len(companies))
+            # Perform analysis if needed
+            if not st.session_state.analysis_complete:
+                # Initialize GitHub API client
+                github_api = GitHubAPI(github_token)
                 
-                company_data = get_organization_data(github_api, company)
-                if company_data:
-                    companies_data.append(company_data)
-            
-            progress_bar.empty()
-            progress_text.empty()
-            
-            if companies_data:
-                # Create all visualizations
-                create_enhanced_visualizations(companies_data)
+                # Parse company names
+                companies = parse_company_urls(uploaded_file.read())
                 
-                # Add download section
-                st.markdown("---")
+                if not companies:
+                    st.error("No valid company names found in the uploaded file.")
+                    return
+
+                # Display initial message
+                st.info("Starting analysis... This may take a few minutes.")
                 
-                # Export options
-                with st.expander("📥 Export Options"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        if st.button("Generate Detailed Report"):
-                            report_data = generate_detailed_report(companies_data)
-                            st.download_button(
-                                "📊 Download Full Report",
-                                report_data,
-                                "github_analytics_report.csv",
-                                "text/csv"
-                            )
+                try:
+                    # Perform the analysis
+                    companies_data = perform_github_analysis(github_api, companies)
                     
-                    with col2:
-                        if st.button("Generate AI Focus Report"):
-                            ai_report_data = generate_ai_report(companies_data)
-                            st.download_button(
-                                "🤖 Download AI Report",
-                                ai_report_data,
-                                "github_ai_report.csv",
-                                "text/csv"
-                            )
-            else:
-                st.error("No valid data could be retrieved for the specified companies.")
+                    if companies_data:
+                        # Store results and rerun
+                        st.session_state.companies_data = companies_data
+                        st.session_state.analysis_complete = True
+                        st.rerun()
+                    else:
+                        st.error("No valid data could be retrieved for the specified companies.")
+                        if 'analysis_complete' in st.session_state:
+                            del st.session_state.analysis_complete
+                        return
+                        
+                except Exception as analysis_error:
+                    st.error(f"Analysis failed: {str(analysis_error)}")
+                    logger.error(f"Analysis error: {str(analysis_error)}")
+                    if 'analysis_complete' in st.session_state:
+                        del st.session_state.analysis_complete
+                    return
 
+            # Create visualizations using cached data
+            if st.session_state.companies_data:
+                create_enhanced_visualizations(st.session_state.companies_data)
+            
+        except requests.exceptions.RequestException as e:
+            st.error(f"Network Error: Could not connect to GitHub API. {str(e)}")
+            logger.error(f"Network error: {str(e)}")
+            if 'analysis_complete' in st.session_state:
+                del st.session_state.analysis_complete
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
             logger.error(f"Error in main execution: {str(e)}", exc_info=True)
+            if 'analysis_complete' in st.session_state:
+                del st.session_state.analysis_complete
     
     else:
         st.info("Please provide your GitHub token and upload a company list to begin analysis.")
@@ -1399,6 +1548,60 @@ def main():
                    - Choose whether to include forked repositories
                    - Select specific metrics to analyze
             """)
+
+    # Add footer
+    st.markdown("---")
+    st.markdown(
+        """
+        <div style='text-align: center; color: #666;'>
+        <small>
+        GitHub Organization Analytics Tool v1.0<br>
+        Created with Streamlit | Data provided by GitHub API
+        </small>
+        </div>
+        """, 
+        unsafe_allow_html=True
+    )
+
+
+
+@cache_data
+def perform_github_analysis(_github_api, companies):
+    """Cached function to perform GitHub analysis."""
+    companies_data = []
+    
+    # Create progress bar and status text outside the loop
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        total_companies = len(companies)
+        for idx, company in enumerate(companies):
+            # Update progress
+            progress = (idx + 1) / total_companies
+            progress_bar.progress(progress)
+            status_text.text(f"Analyzing {company}... ({idx + 1}/{total_companies})")
+            
+            company_data = get_organization_data(_github_api, company)
+            if company_data:
+                companies_data.append(company_data)
+        
+        # Clean up progress indicators
+        progress_bar.empty()
+        status_text.empty()
+        
+        return companies_data
+        
+    except Exception as e:
+        # Clean up progress indicators on error
+        if 'progress_bar' in locals():
+            progress_bar.empty()
+        if 'status_text' in locals():
+            status_text.empty()
+        logger.error(f"Error in analysis: {str(e)}")
+        raise e
+    
+    
 
 if __name__ == "__main__":
     main()
